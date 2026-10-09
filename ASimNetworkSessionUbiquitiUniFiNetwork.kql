@@ -1,0 +1,397 @@
+let ASimNetworkSessionUbiquitiUniFiNetwork = (disabled: bool = false, pack: bool = false) {
+    // ASIM NetworkSession parser for Ubiquiti UniFi Network (UDM Pro) CEF syslog
+    // Source table: Ubiquiti_CL (raw CEF syslog line stored in Message)
+    // Covers UniFi Network event classes: 201 (Threat Detected and Blocked), 203 (Blocked by Firewall),
+    // 400/401/402 (WiFi Client Connected/Disconnected/Roamed), 403/404 (Wired Client Connected/Disconnected),
+    // 520/521 (VPN Client Connected/Disconnected), 522/523 (Teleport Client Connected/Disconnected)
+    let SanitizeHostname = (h: string) {
+        trim(@'-+$', trim(@'^-+', replace_regex(h, @'[^A-Za-z0-9\-]+', '-')))
+    };
+    let SeverityToASim = (sev: int) {
+        case(
+            sev <= 3, "Informational",
+            sev <= 6, "Low",
+            sev <= 8, "Medium",
+            "High"
+        )
+    };
+    let RiskToLevel = (risk: string) {
+        case(
+            risk == "critical", 100,
+            risk == "high", 75,
+            risk == "medium", 50,
+            risk == "low", 25,
+            0
+        )
+    };
+    let DirectionToASim = (dir: string) {
+        case(
+            dir == "outgoing", "Outbound",
+            dir == "incoming", "Inbound",
+            dir == "local", "Local",
+            "Unknown"
+        )
+    };
+    let DurationToSeconds = (d: string) {
+        let h = toint(extract(@'(\d+)h', 1, d));
+        let m = toint(extract(@'(\d+)m', 1, d));
+        let s = toint(extract(@'(\d+)s', 1, d));
+        coalesce(h, 0) * 3600 + coalesce(m, 0) * 60 + coalesce(s, 0)
+    };
+    let SizeToBytes = (sz: string) {
+        let num = todouble(extract(@'([\d\.]+)', 1, sz));
+        let unit = extract(@'[\d\.]+\s*([A-Za-z]+)', 1, sz);
+        case(
+            unit == "GB", tolong(num * 1024 * 1024 * 1024),
+            unit == "MB", tolong(num * 1024 * 1024),
+            unit == "KB", tolong(num * 1024),
+            unit == "B", tolong(num),
+            tolong(num)
+        )
+    };
+    Ubiquiti_CL
+    | where not(disabled)
+    | where Message has "CEF: 0|Ubiquiti|UniFi Network|"
+    | parse Message with
+        RawTimestamp: string
+        " "
+        SyslogHostname: string
+        " CEF: "
+        CefVersion: int
+        "|"
+        DeviceVendor: string
+        "|"
+        DeviceProduct: string
+        "|"
+        DeviceVersion: string
+        "|"
+        DeviceEventClassID: string
+        "|"
+        Name: string
+        "|"
+        Severity: int
+        "|"
+        Extension: string
+    | where DeviceEventClassID in ("201", "203", "400", "401", "402", "403", "404", "520", "521", "522", "523")
+    | extend
+        category = extract(@'(?:^|\s)UNIFIcategory=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        host = extract(@'(?:^|\s)UNIFIhost=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        proto = extract(@'(?:^|\s)proto=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        spt = extract(@'(?:^|\s)spt=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        dpt = extract(@'(?:^|\s)dpt=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        act = extract(@'(?:^|\s)act=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        app = extract(@'(?:^|\s)app=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        src = extract(@'(?:^|\s)src=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        dst = extract(@'(?:^|\s)dst=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        risk = extract(@'(?:^|\s)UNIFIrisk=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        policyName = extract(@'(?:^|\s)UNIFIpolicyName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        policyType = extract(@'(?:^|\s)UNIFIpolicyType=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        direction = extract(@'(?:^|\s)UNIFIdirection=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceInboundInterface = extract(@'(?:^|\s)deviceInboundInterface=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceOutboundInterface = extract(@'(?:^|\s)deviceOutboundInterface=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceMac = extract(@'(?:^|\s)UNIFIdeviceMac=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceName = extract(@'(?:^|\s)UNIFIdeviceName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceModel = extract(@'(?:^|\s)UNIFIdeviceModel=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceIp = extract(@'(?:^|\s)UNIFIdeviceIp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        deviceVersion = extract(@'(?:^|\s)UNIFIdeviceVersion=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcRegion = extract(@'(?:^|\s)UNIFIsrcRegion=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        dstRegion = extract(@'(?:^|\s)UNIFIdstRegion=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcZone = extract(@'(?:^|\s)UNIFIsrcZone=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        dstZone = extract(@'(?:^|\s)UNIFIdstZone=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        totalBytes = extract(@'(?:^|\s)UNIFItotalBytes=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        totalPackets = extract(@'(?:^|\s)UNIFItotalPackets=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        packetsReceived = extract(@'(?:^|\s)UNIFIpacketsReceived=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        packetsSent = extract(@'(?:^|\s)UNIFIpacketsSent=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        bytesReceived = extract(@'(?:^|\s)UNIFIbytesReceived=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        bytesSent = extract(@'(?:^|\s)UNIFIbytesSent=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        flowId = extract(@'(?:^|\s)UNIFIflowId=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        ipsSessionId = extract(@'(?:^|\s)UNIFIipsSessionId=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        ipsSignature = extract(@'(?:^|\s)UNIFIipsSignature=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        ipsSignatureId = extract(@'(?:^|\s)UNIFIipsSignatureId=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        firewallPolicy = extract(@'(?:^|\s)UNIFIfirewallPolicy=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcClientAlias = extract(@'(?:^|\s)UNIFIsrcClientAlias=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcClientHostname = extract(@'(?:^|\s)UNIFIsrcClientHostname=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcClientIp = extract(@'(?:^|\s)UNIFIsrcClientIp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        srcClientMac = extract(@'(?:^|\s)UNIFIsrcClientMac=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        utcTime = extract(@'(?:^|\s)UNIFIutcTime=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        connectedToDeviceName = extract(@'(?:^|\s)UNIFIconnectedToDeviceName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        connectedToDeviceIp = extract(@'(?:^|\s)UNIFIconnectedToDeviceIp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        connectedToDeviceMac = extract(@'(?:^|\s)UNIFIconnectedToDeviceMac=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        connectedToDeviceModel = extract(@'(?:^|\s)UNIFIconnectedToDeviceModel=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        connectedToDevicePort = extract(@'(?:^|\s)UNIFIconnectedToDevicePort=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        lastConnectedToDeviceName = extract(@'(?:^|\s)UNIFIlastConnectedToDeviceName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        lastConnectedToDeviceIp = extract(@'(?:^|\s)UNIFIlastConnectedToDeviceIp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        lastConnectedToDeviceMac = extract(@'(?:^|\s)UNIFIlastConnectedToDeviceMac=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        lastConnectedToDeviceModel = extract(@'(?:^|\s)UNIFIlastConnectedToDeviceModel=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        lastConnectedToDevicePort = extract(@'(?:^|\s)UNIFIlastConnectedToDevicePort=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        clientAlias = extract(@'(?:^|\s)UNIFIclientAlias=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        clientHostname = extract(@'(?:^|\s)UNIFIclientHostname=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        clientIp = extract(@'(?:^|\s)UNIFIclientIp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        clientMac = extract(@'(?:^|\s)UNIFIclientMac=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wifiChannel = extract(@'(?:^|\s)UNIFIwifiChannel=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wifiChannelWidth = extract(@'(?:^|\s)UNIFIwifiChannelWidth=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wifiName = extract(@'(?:^|\s)UNIFIwifiName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wifiBand = extract(@'(?:^|\s)UNIFIwifiBand=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wifiRssi = extract(@'(?:^|\s)UNIFIWiFiRssi=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        authMethod = extract(@'(?:^|\s)UNIFIauthMethod=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        networkName = extract(@'(?:^|\s)UNIFInetworkName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        networkSubnet = extract(@'(?:^|\s)UNIFInetworkSubnet=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        networkVlan = extract(@'(?:^|\s)UNIFInetworkVlan=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        duration = extract(@'(?:^|\s)UNIFIduration=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        usageDown = extract(@'(?:^|\s)UNIFIusageDown=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        usageUp = extract(@'(?:^|\s)UNIFIusageUp=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        linkSpeed = extract(@'(?:^|\s)UNIFIlinkSpeed=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        wanId = extract(@'(?:^|\s)UNIFIwanId=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        suser = extract(@'(?:^|\s)suser=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        vpnName = extract(@'(?:^|\s)UNIFIvpnName=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        vpnType = extract(@'(?:^|\s)UNIFIvpnType=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        vpnServerAddress = extract(@'(?:^|\s)UNIFIvpnServerAddress=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension),
+        vpnSubnet = extract(@'(?:^|\s)UNIFIvpnSubnet=(.*?)(?:\s[A-Za-z]+=|$)', 1, Extension)
+    | extend
+        IsConnectEvent = DeviceEventClassID in ("400", "402", "403", "522", "520"),
+        IsNewSessionEvent = DeviceEventClassID in ("400", "403", "522", "520"),
+        IsDisconnectEvent = DeviceEventClassID in ("401", "404", "521", "523"),
+        IsThreatOrFirewallEvent = DeviceEventClassID in ("201", "203"),
+        IsVpnEvent = DeviceEventClassID in ("520", "521", "522", "523"),
+        IsWifiOrWiredEvent = DeviceEventClassID in ("400", "401", "402", "403", "404")
+    | extend
+        EventOriginalUid = flowId,
+        NetworkSessionId = iff(flowId == "null" or isempty(flowId), "", flowId),
+        EventEndTimeParsed = todatetime(utcTime),
+        NetworkDurationSeconds = toint(iff(isnotempty(duration), DurationToSeconds(duration), int(null)))
+    | extend
+        EventEndTime = EventEndTimeParsed,
+        EventStartTime = iff(isnotempty(NetworkDurationSeconds), EventEndTimeParsed - (1s * NetworkDurationSeconds), EventEndTimeParsed),
+        SrcBytes = case(
+            IsThreatOrFirewallEvent, toint(bytesSent),
+            IsDisconnectEvent and IsVpnEvent == false, SizeToBytes(usageUp),
+            int(null)
+        ),
+        DstBytes = case(
+            IsThreatOrFirewallEvent, toint(bytesReceived),
+            IsDisconnectEvent and IsVpnEvent == false, SizeToBytes(usageDown),
+            int(null)
+        ),
+        NetworkBytes = case(
+            IsThreatOrFirewallEvent, toint(totalBytes),
+            IsDisconnectEvent and IsVpnEvent, SizeToBytes(usageUp) + SizeToBytes(usageDown),
+            long(null)
+        ),
+        NetworkPackets = iff(IsThreatOrFirewallEvent, toint(totalPackets), long(null)),
+        SrcPackets = iff(DeviceEventClassID == "201", toint(packetsSent), long(null)),
+        DstPackets = iff(DeviceEventClassID == "201", toint(packetsReceived), long(null))
+    | extend
+        SrcIpAddr = case(
+            DeviceEventClassID == "201", src,
+            DeviceEventClassID == "203", srcClientIp,
+            DeviceEventClassID in ("400", "402", "403"), clientIp,
+            DeviceEventClassID in ("401", "404"), clientIp,
+            DeviceEventClassID == "520", src,
+            DeviceEventClassID in ("522"), clientIp,
+            ""
+        ),
+        SrcMacAddr = case(
+            DeviceEventClassID == "203", srcClientMac,
+            IsWifiOrWiredEvent and IsConnectEvent, clientMac,
+            IsWifiOrWiredEvent and IsDisconnectEvent, clientMac,
+            ""
+        ),
+        SrcHostname = case(
+            DeviceEventClassID == "203", SanitizeHostname(srcClientHostname),
+            IsWifiOrWiredEvent, SanitizeHostname(clientHostname),
+            ""
+        ),
+        SrcNatIpAddr = iff(DeviceEventClassID in ("520", "522"), clientIp, ""),
+        SrcUsername = iff(IsVpnEvent, suser, ""),
+        SrcUsernameType = iff(IsVpnEvent and isnotempty(suser), "Simple", ""),
+        SrcZone = iff(IsThreatOrFirewallEvent, srcZone, ""),
+        SrcGeoCountry = iff(DeviceEventClassID == "201", srcRegion, ""),
+        DstIpAddr = case(
+            IsThreatOrFirewallEvent, dst,
+            IsVpnEvent, vpnServerAddress,
+            IsConnectEvent and IsWifiOrWiredEvent, connectedToDeviceIp,
+            IsDisconnectEvent and IsWifiOrWiredEvent, lastConnectedToDeviceIp,
+            ""
+        ),
+        DstMacAddr = case(
+            IsConnectEvent and IsWifiOrWiredEvent, connectedToDeviceMac,
+            IsDisconnectEvent and IsWifiOrWiredEvent, lastConnectedToDeviceMac,
+            ""
+        ),
+        DstHostname = case(
+            IsConnectEvent and IsWifiOrWiredEvent, SanitizeHostname(connectedToDeviceName),
+            IsDisconnectEvent and IsWifiOrWiredEvent, SanitizeHostname(lastConnectedToDeviceName),
+            ""
+        ),
+        DstInterfaceName = case(
+            IsConnectEvent and DeviceEventClassID == "403", connectedToDevicePort,
+            IsDisconnectEvent and DeviceEventClassID == "404", lastConnectedToDevicePort,
+            ""
+        ),
+        DstZone = iff(IsThreatOrFirewallEvent, dstZone, ""),
+        DstGeoCountry = iff(DeviceEventClassID == "201", dstRegion, ""),
+        DstVlanId = iff(IsWifiOrWiredEvent, networkVlan, "")
+    | extend
+        Src = coalesce(iff(isempty(SrcHostname), "", SrcHostname), iff(isempty(SrcIpAddr), "", SrcIpAddr)),
+        Dst = coalesce(iff(isempty(DstHostname), "", DstHostname), iff(isempty(DstIpAddr), "", DstIpAddr)),
+        NetworkProtocol = iff(IsThreatOrFirewallEvent and isnotempty(proto), toupper(proto), ""),
+        NetworkApplicationProtocol = iff(IsThreatOrFirewallEvent and isnotempty(app) and app != "Other", app, ""),
+        SrcPortNumber = iff(IsThreatOrFirewallEvent, toint(spt), int(null)),
+        DstPortNumber = iff(IsThreatOrFirewallEvent, toint(dpt), int(null)),
+        NetworkDirection = iff(IsThreatOrFirewallEvent, DirectionToASim(direction), ""),
+        DvcInboundInterface = iff(IsThreatOrFirewallEvent, deviceInboundInterface, ""),
+        DvcOutboundInterface = iff(IsThreatOrFirewallEvent, deviceOutboundInterface, ""),
+        DvcAction = case(
+            act == "blocked", "Deny",
+            IsNewSessionEvent, "Allow",
+            ""
+        ),
+        NetworkRuleName = case(
+            DeviceEventClassID == "201", policyName,
+            DeviceEventClassID == "203", coalesce(iff(isempty(firewallPolicy), "", firewallPolicy), policyName),
+            IsVpnEvent, vpnName,
+            ""
+        ),
+        ThreatCategory = iff(IsThreatOrFirewallEvent, policyType, ""),
+        ThreatOriginalRiskLevel = iff(IsThreatOrFirewallEvent, risk, ""),
+        ThreatRiskLevel = toint(iff(IsThreatOrFirewallEvent and isnotempty(risk), RiskToLevel(risk), int(null))),
+        ThreatName = iff(DeviceEventClassID == "201", ipsSignature, ""),
+        ThreatId = iff(DeviceEventClassID == "201", ipsSignatureId, "")
+    | extend
+        Dvc = host,
+        DvcHostname = SanitizeHostname(host),
+        DvcIpAddr = iff(DeviceEventClassID == "201", deviceIp, ""),
+        ASimMatchingIpAddr = "Both",
+        ASimMatchingHostname = case(
+            isnotempty(SrcHostname) and isnotempty(DstHostname), "Both",
+            isnotempty(SrcHostname), "SrcHostname",
+            isnotempty(DstHostname), "DstHostname",
+            "-"
+        ),
+        EventOriginalType = Name,
+        EventOriginalSubType = category,
+        EventSubType = case(
+            IsNewSessionEvent, "Start",
+            IsDisconnectEvent, "End",
+            ""
+        ),
+        EventProductVersion = DeviceVersion,
+        EventSeverity = SeverityToASim(Severity),
+        EventOriginalSeverity = tostring(Severity),
+        EventType = "NetworkSession",
+        EventResult = "Success",
+        EventCount = int(1),
+        EventVendor = "Ubiquiti",
+        EventProduct = "UniFi Network",
+        EventSchema = "NetworkSession",
+        EventSchemaVersion = "0.2.7",
+        Type = "Ubiquiti_CL"
+    | extend
+        AdditionalFields = iff(
+            pack,
+            bag_pack(
+                "DeviceMac", deviceMac,
+                "DeviceName", deviceName,
+                "DeviceModel", deviceModel,
+                "DeviceIp", deviceIp,
+                "SrcClientAlias", srcClientAlias,
+                "ConnectedToDeviceModel", connectedToDeviceModel,
+                "LastConnectedToDeviceModel", lastConnectedToDeviceModel,
+                "ClientAlias", clientAlias,
+                "WifiChannel", wifiChannel,
+                "WifiChannelWidth", wifiChannelWidth,
+                "WifiName", wifiName,
+                "WifiBand", wifiBand,
+                "WifiRssi", wifiRssi,
+                "AuthMethod", authMethod,
+                "NetworkName", networkName,
+                "NetworkSubnet", networkSubnet,
+                "LinkSpeed", linkSpeed,
+                "WanId", wanId,
+                "VpnType", vpnType,
+                "VpnSubnet", vpnSubnet,
+                "IpsSessionId", ipsSessionId
+            ),
+            dynamic(null)
+        )
+    | project
+        TimeGenerated,
+        EventStartTime,
+        EventEndTime,
+        EventType,
+        EventSubType,
+        EventResult,
+        EventSeverity,
+        EventOriginalSeverity,
+        EventCount,
+        EventVendor,
+        EventProduct,
+        EventProductVersion,
+        EventSchema,
+        EventSchemaVersion,
+        EventOriginalType,
+        EventOriginalSubType,
+        EventOriginalUid,
+        Dvc,
+        DvcHostname,
+        DvcIpAddr,
+        ASimMatchingIpAddr,
+        ASimMatchingHostname,
+        DvcAction,
+        DvcInboundInterface,
+        DvcOutboundInterface,
+        Src,
+        SrcIpAddr,
+        SrcPortNumber,
+        SrcHostname,
+        SrcMacAddr,
+        SrcNatIpAddr,
+        SrcZone,
+        SrcGeoCountry,
+        SrcBytes,
+        SrcPackets,
+        SrcUsername,
+        SrcUsernameType,
+        Dst,
+        DstIpAddr,
+        DstPortNumber,
+        DstHostname,
+        DstMacAddr,
+        DstInterfaceName,
+        DstZone,
+        DstGeoCountry,
+        DstVlanId,
+        DstBytes,
+        DstPackets,
+        NetworkProtocol,
+        NetworkApplicationProtocol,
+        NetworkDirection,
+        NetworkBytes,
+        NetworkPackets,
+        NetworkDuration = NetworkDurationSeconds,
+        NetworkRuleName,
+        NetworkSessionId,
+        ThreatCategory,
+        ThreatOriginalRiskLevel,
+        ThreatRiskLevel,
+        ThreatName,
+        ThreatId,
+        AdditionalFields,
+        SrcUserEntityKey = "",
+        DstUserEntityKey = "",
+        SrcSystemEntityKey = "",
+        DstSystemEntityKey = "",
+        DvcEntityKey = "",
+        SrcApplicationEntityKey = "",
+        DstApplicationEntityKey = "",
+        SrcUserAdditionalIds = dynamic([]),
+        DstUserAdditionalIds = dynamic([]),
+        AdditionalEntities = dynamic([]),
+        Type,
+        Duration = NetworkDurationSeconds,
+        OuterVlanId = DstVlanId,
+        SessionId = NetworkSessionId,
+        Hostname = DstHostname,
+        IpAddr = SrcIpAddr
+};
+ASimNetworkSessionUbiquitiUniFiNetwork(disabled=False)
